@@ -1,44 +1,43 @@
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
-"""
-Train and eval functions used in main.py
-"""
 import math
 import os
 import sys
 import torch
 import torch.distributed as dist
-
 from tqdm import tqdm
 from typing import Iterable
-
 import utils.misc as utils
 import utils.loss_utils as loss_utils
 import utils.eval_utils as eval_utils
-from utils.box_utils import xywh2xyxy
+from utils.ce_utils import adjust_keep_rate
 
-
-def train_one_epoch(args, model: torch.nn.Module, data_loader: Iterable,
-                    optimizer: torch.optim.Optimizer, device: torch.device,
-                    epoch: int, max_norm: float = 0):
+def train_one_epoch(args, model: torch.nn.Module, data_loader: Iterable, optimizer: torch.optim.Optimizer, device: torch.device, epoch: int, max_norm: float = 0):
     model.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
-    header = 'Epoch: [{}]'.format(epoch)
+    header = 'Epoch:[{}]'.format(epoch)
     print_freq = 10
 
     # data processing
     for batch in metric_logger.log_every(data_loader, print_freq, header):
-        img_data, text_data, target = batch
-
-        # copy to GPU
+        img_data, text_data, target, image_name, txt, img_w, img_h = batch
+        if args.ce:
+            ce_keep_rate = None
+            ce_start_epoch = args.ce_start
+            ce_warm_epoch = args.ce_warm
+            ce_keep_rate = adjust_keep_rate(epoch, warmup_epochs=ce_start_epoch,
+                                                        total_epochs=ce_start_epoch + ce_warm_epoch,
+                                                        ITERS_PER_EPOCH=1,
+                                                        base_keep_rate=args.ce_keep)
+        else:
+            ce_keep_rate = 1
         img_data = img_data.to(device)
         text_data = text_data.to(device)
         target = target.to(device)
-
         # model forward
-        output = model(img_data, text_data)
+        output = model(img_data, text_data, ce_keep_rate)
 
-        loss_dict = loss_utils.trans_vg_loss(output, target)
+        # target xywh
+        loss_dict = loss_utils.trans_vg_loss(output, target, args.bbox_w, args.giou_w) 
         losses = sum(loss_dict[k] for k in loss_dict.keys())
 
         # reduce losses over all GPUs for logging purposes
@@ -67,21 +66,33 @@ def train_one_epoch(args, model: torch.nn.Module, data_loader: Iterable,
 
 
 @torch.no_grad()
-def validate(args, model: torch.nn.Module, data_loader: Iterable, device: torch.device):
+def validate(args, model: torch.nn.Module, data_loader: Iterable, device: torch.device, epoch: int):
     model.eval()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Eval:'
 
     for batch in metric_logger.log_every(data_loader, 10, header):
-        img_data, text_data, target = batch
+        img_data, text_data, target, image_name, txt, img_w, img_h = batch
         batch_size = img_data.tensors.size(0)
+
+        if args.ce:
+            ce_keep_rate = None
+            ce_start_epoch = args.ce_start
+            ce_warm_epoch = args.ce_warm
+            ce_keep_rate = adjust_keep_rate(epoch, warmup_epochs=ce_start_epoch,
+                                                        total_epochs=ce_start_epoch + ce_warm_epoch,
+                                                        ITERS_PER_EPOCH=1,
+                                                        base_keep_rate=args.ce_keep)
+        else:
+            ce_keep_rate = 1
+
         # copy to GPU
         img_data = img_data.to(device)
         text_data = text_data.to(device)
         target = target.to(device)
 
-        pred_boxes = model(img_data, text_data)
+        pred_boxes = model(img_data, text_data, ce_keep_rate)
         miou, accu = eval_utils.trans_vg_eval_val(pred_boxes, target)
 
         metric_logger.update_v2('miou', torch.mean(miou), batch_size)
@@ -100,14 +111,14 @@ def evaluate(args, model: torch.nn.Module, data_loader: Iterable, device: torch.
     pred_box_list = []
     gt_box_list = []
     for _, batch in enumerate(tqdm(data_loader)):
-        img_data, text_data, target = batch
+        img_data, text_data, target, image_name, txt, img_w, img_h = batch
         batch_size = img_data.tensors.size(0)
         # copy to GPU
         img_data = img_data.to(device)
         text_data = text_data.to(device)
         target = target.to(device)
 
-        output = model(img_data, text_data)
+        output = model(img_data, text_data, args.ce_keep)
 
         pred_box_list.append(output.cpu())
         gt_box_list.append(target.cpu())
@@ -121,9 +132,7 @@ def evaluate(args, model: torch.nn.Module, data_loader: Iterable, device: torch.
 
     torch.cuda.synchronize()
     dist.all_reduce(result_tensor)
-
     accuracy = float(result_tensor[0]) / float(result_tensor[1])
-
     return accuracy
 
 

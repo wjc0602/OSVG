@@ -2,7 +2,7 @@
 from torchvision.transforms import Compose, ToTensor, Normalize
 
 import datasets.transforms as T
-from .data_loader import TransVGDataset
+from .data_loader import TransVGDataset,OSVGDataset
 
 
 def make_transforms(args, image_set, is_onestage=False):
@@ -61,6 +61,17 @@ def build_dataset(split, args):
                           split_root=args.split_root,
                           dataset=args.dataset,
                           split=split,
+                          transform=make_transforms(args, split),
+                          max_query_len=args.max_query_len,
+                          prompt_template=args.prompt)
+
+
+def build_dataset_osvg(split, args):
+    return OSVGDataset(data_root=args.data_root,
+                          split_root=args.split_root,
+                          dataset=args.dataset,
+                          split=split,
+                          tokenizer_type = args.txt_model,
                           transform=make_transforms(args, split),
                           max_query_len=args.max_query_len,
                           prompt_template=args.prompt)

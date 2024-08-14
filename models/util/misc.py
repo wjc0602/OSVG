@@ -15,11 +15,14 @@ from typing import Optional, List
 import torch
 import torch.distributed as dist
 from torch import Tensor
-import numpy as np
 
 # needed due to empty tensor bug in pytorch and torchvision 0.5
 import torchvision
-if 0.7 > float(torchvision.__version__[:3]) > 0.1:
+
+TORCH_MAJOR = int(torchvision.__version__.split('.')[0])
+TORCH_MINOR = int(torchvision.__version__.split('.')[1])
+
+if TORCH_MAJOR == 0 and TORCH_MINOR < 7:
     from torchvision.ops import _new_empty_tensor
     from torchvision.ops.misc import _output_size
 
@@ -29,12 +32,12 @@ class SmoothedValue(object):
     window or the global series average.
     """
 
-    def __init__(self, window_size=1, fmt=None):
+    def __init__(self, window_size=20, fmt=None):
         if fmt is None:
             fmt = "{median:.4f} ({global_avg:.4f})"
         self.deque = deque(maxlen=window_size)
         self.total = 0.0
-        self.count = 1e-12
+        self.count = 0
         self.fmt = fmt
 
     def update(self, value, n=1):
@@ -57,8 +60,6 @@ class SmoothedValue(object):
 
     @property
     def median(self):
-        # import pdb
-        # pdb.set_trace()
         d = torch.tensor(list(self.deque))
         return d.median().item()
 
@@ -78,9 +79,6 @@ class SmoothedValue(object):
     @property
     def value(self):
         return self.deque[-1]
-    
-    def get_global_avg(self):
-        return self.total / self.count
 
     def __str__(self):
         return self.fmt.format(
@@ -167,21 +165,11 @@ class MetricLogger(object):
         self.delimiter = delimiter
 
     def update(self, **kwargs):
-        # import pdb
-        # pdb.set_trace()
         for k, v in kwargs.items():
             if isinstance(v, torch.Tensor):
                 v = v.item()
             assert isinstance(v, (float, int))
             self.meters[k].update(v)
-
-    def update_v2(self, key, value, num):
-        self.meters[key].update(value, num)
-        # for k, v in kwargs.items():
-        #     if isinstance(v, torch.Tensor):
-        #         v = v.item()
-        #     assert isinstance(v, (float, int))
-        #     self.meters[k].update(v)
 
     def __getattr__(self, attr):
         if attr in self.meters:
@@ -257,7 +245,8 @@ class MetricLogger(object):
             end = time.time()
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        print('{} Total time: {} ({:.4f} s / it)'.format(header, total_time_str, total_time / len(iterable)))
+        print('{} Total time: {} ({:.4f} s / it)'.format(
+            header, total_time_str, total_time / len(iterable)))
 
 
 def get_sha():
@@ -280,60 +269,9 @@ def get_sha():
     return message
 
 
-# def collate_fn(raw_batch):
-#     raw_batch = list(zip(*raw_batch))
-#     img_data = nested_tensor_from_tensor_list(raw_batch[0])
-#     word_id = torch.tensor(raw_batch[1])
-#     word_mask = torch.tensor(raw_batch[2])
-#     text_data = NestedTensor(word_id, word_mask)
-#     bbox = torch.tensor(raw_batch[3])
-#     batch = [img_data, text_data, bbox]
-#     return tuple(batch)
-def collate_fn_osvg(raw_batch):
-    raw_batch = list(zip(*raw_batch))
-
-    img = torch.stack(raw_batch[0])
-    img_mask = torch.tensor(np.array(raw_batch[1]))
-    img_data = NestedTensor(img, img_mask)
-    txt_ids = torch.tensor(np.array(raw_batch[2]))
-    txt_mask = torch.from_numpy(np.array(raw_batch[3]))
-    text_data = NestedTensor(txt_ids, txt_mask)
-    bbox = torch.tensor(np.array(raw_batch[4]))
-    batch = [img_data, text_data, bbox]
-    return tuple(batch)
-
-def collate_fn(raw_batch):
-    raw_batch = list(zip(*raw_batch))
-    img = torch.stack(raw_batch[0])
-    img_mask = torch.tensor(np.array(raw_batch[1]))
-    img_data = NestedTensor(img, img_mask)
-    word_id = torch.tensor(np.array(raw_batch[2]))
-    word_mask = torch.from_numpy(np.array(raw_batch[3]))
-    text_data = NestedTensor(word_id, word_mask)
-    bbox = torch.tensor(np.array(raw_batch[4]))
-    img_w = torch.tensor(np.array(raw_batch[8]))
-    img_h = torch.tensor(np.array(raw_batch[9]))
-    batch = [img_data, text_data, bbox, raw_batch[5], raw_batch[6], img_w, img_h]
-    return tuple(batch)
-
-
-def collate_fn_filtering(raw_batch):
-    raw_batch = list(zip(*raw_batch))
-
-    img = torch.stack(raw_batch[0])
-    img_mask = torch.tensor(np.array(raw_batch[1]))
-    img_data = NestedTensor(img, img_mask)
-    word_id = torch.tensor(np.array(raw_batch[2]))
-    word_mask = torch.from_numpy(np.array(raw_batch[3]))
-    text_data = NestedTensor(word_id, word_mask)
-    bbox = torch.tensor(np.array(raw_batch[4]))
-    img_file = raw_batch[5]
-    phrase = raw_batch[6]
-    bbox_ori = raw_batch[7]
-    if len(raw_batch) == 7:
-        batch = [img_data, text_data, bbox, raw_batch[5], raw_batch[6]]
-    else:
-        batch = [img_data, text_data, bbox, img_file, phrase, bbox_ori]
+def collate_fn(batch):
+    batch = list(zip(*batch))
+    batch[0] = nested_tensor_from_tensor_list(batch[0])
     return tuple(batch)
 
 
@@ -470,7 +408,6 @@ def save_on_master(*args, **kwargs):
 
 
 def init_distributed_mode(args):
-    """Initialize distributed training, if appropriate"""
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         args.rank = int(os.environ["RANK"])
         args.world_size = int(os.environ['WORLD_SIZE'])
@@ -487,8 +424,10 @@ def init_distributed_mode(args):
 
     torch.cuda.set_device(args.gpu)
     args.dist_backend = 'nccl'
-    print('| distributed init (rank {}): {}'.format(args.rank, args.dist_url), flush=True)
-    torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=args.rank)
+    print('| distributed init (rank {}): {}'.format(
+        args.rank, args.dist_url), flush=True)
+    torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
+                                         world_size=args.world_size, rank=args.rank)
     torch.distributed.barrier()
     setup_for_distributed(args.rank == 0)
 

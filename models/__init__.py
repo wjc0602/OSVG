@@ -2,7 +2,6 @@ from .clip_vg import CLIP_VG
 from .clip_vg import ML_CLIP_VG
 from .clip_vg import ML_CLIP_VG_PROMPT
 
-
 def build_model(args):
     return ML_CLIP_VG(args)
 

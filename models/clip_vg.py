@@ -239,7 +239,7 @@ class ML_CLIP_VG_PROMPT(nn.Module):
         else:  # default
             print("init ViT-B/16")
             self.clip, _ = clip.load("ViT-B/16", device=args.device)
-            self.extract_layer = [0, 3, 7, 11]
+            self.extract_layer = [2, 5, 8, 11]
             self.patch_size = 16
 
         for parameter in self.clip.parameters():
@@ -357,23 +357,34 @@ class CLIP_VG(nn.Module):
 
     def forward(self, img_data, text_data):
         batch_size = img_data.tensors.shape[0]
+        # clip visual and text feature extraction
         image_tensors, text_tensors = self.tensorize_inputs(img_data, text_data)
         image_features = self.clip.encode_image(image_tensors)  # B * 197 * 512
         text_features = self.clip.encode_text(text_tensors)  # B * 77 * 512
+
+        # neck
         visu_src = self.visu_proj(image_features.float())
         text_src = self.text_proj(text_features.float())
+
         visu_src = visu_src.permute(1, 0, 2)  # 197 * 4 * 512
         text_src = text_src.permute(1, 0, 2)  # 77 * 4 * 512
+
+        # cat feature
         tgt_src = self.reg_token.weight.unsqueeze(1).repeat(1, batch_size, 1)  # 1 * B * hidden_dim
         vl_src = torch.cat([tgt_src, text_src, visu_src], dim=0)
+
+        # cat mask
         visu_mask, text_mask = self.get_masks(img_data, text_data)
         tgt_mask = torch.zeros((batch_size, 1)).to(tgt_src.device).to(torch.bool)
         cls_mask = torch.zeros((batch_size, 1)).to(tgt_src.device).to(torch.bool)
         vl_mask = torch.cat([tgt_mask, text_mask, cls_mask, visu_mask], dim=1)
+        # pos
         vl_pos = self.vl_pos_embed.weight.unsqueeze(1).repeat(1, batch_size, 1)
-
+        
         vg_hs = self.vl_transformer(vl_src, vl_mask, vl_pos)  # (1+L+N)xBxC
         vg_hs = vg_hs[0]
+
+        # head
         pred_box = self.bbox_embed(vg_hs).sigmoid()
 
         return pred_box

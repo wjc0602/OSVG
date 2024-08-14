@@ -1,9 +1,7 @@
 import torch
 import numpy as np
 import torch.nn.functional as F
-
-from utils.box_utils import bbox_iou, xywh2xyxy, xyxy2xywh, generalized_box_iou
-from utils.misc import get_world_size
+from utils.box_utils import bbox_iou, xywh2xyxy, generalized_box_iou
 
 
 def build_target(args, gt_bbox, pred, device):
@@ -53,8 +51,7 @@ def build_target(args, gt_bbox, pred, device):
         best_grid = args.size // (32 / (2 ** best_scale))
         anchor_idxs = [x + 3 * best_scale for x in [0, 1, 2]]
         anchors = [args.anchors_full[i] for i in anchor_idxs]
-        scaled_anchors = [(x[0] / (args.anchor_imsize / best_grid), \
-                           x[1] / (args.anchor_imsize / best_grid)) for x in anchors]
+        scaled_anchors = [(x[0] / (args.anchor_imsize / best_grid), x[1] / (args.anchor_imsize / best_grid)) for x in anchors]
 
         gi = coord_list[best_scale][ii, 0].long()
         gj = coord_list[best_scale][ii, 1].long()
@@ -104,23 +101,15 @@ def yolo_loss(pred_list, target, gi, gj, best_n_list, device, w_coord=5., w_neg=
     return (loss_x + loss_y + loss_w + loss_h) * w_coord + loss_conf
 
 
-def trans_vg_loss(batch_pred, batch_target):
-    """Compute the losses related to the bounding boxes, 
-       including the L1 regression loss and the GIoU loss
-    """
-
+def trans_vg_loss(batch_pred, batch_target, bbox_w, giou_w):
     batch_size = batch_pred.shape[0]
-    # world_size = get_world_size()
     num_boxes = batch_size
 
     loss_bbox = F.l1_loss(batch_pred, batch_target, reduction='none')
-    loss_giou = 1 - torch.diag(generalized_box_iou(
-        xywh2xyxy(batch_pred),
-        xywh2xyxy(batch_target)
-    ))
+    loss_giou = 1 - torch.diag(generalized_box_iou(xywh2xyxy(batch_pred),xywh2xyxy(batch_target)))
 
     losses = {}
-    losses['loss_bbox'] = loss_bbox.sum() / num_boxes
-    losses['loss_giou'] = loss_giou.sum() / num_boxes
+    losses['loss_bbox'] = loss_bbox.sum() / num_boxes * bbox_w
+    losses['loss_giou'] = loss_giou.sum() / num_boxes * giou_w
 
     return losses
