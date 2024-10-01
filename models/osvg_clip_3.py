@@ -5,6 +5,8 @@ import torch.nn.functional as F
 from .clip import *
 from utils.misc import NestedTensor
 
+# no reg token
+
 def resize_pos_embed(clip_visual, patch_size, imsize_new):
 
     # for patch embedding
@@ -33,21 +35,6 @@ def candidate_elimination(attn: torch.Tensor,
                           lens_t: int, 
                           keep_ratio: float, 
                           global_index: torch.Tensor):
-    """
-    Eliminate potential background candidates for computation reduction and noise cancellation.
-    Args:
-        attn (torch.Tensor): [B, num_heads, L_t + L_s, L_t + L_s], attention weights
-        tokens (torch.Tensor):  [B, L_t + L_s, C], template and search region tokens
-        lens_t (int): length of template
-        keep_ratio (float): keep ratio of search region tokens (candidates)
-        global_index (torch.Tensor): global index of search region tokens
-        box_mask_z (torch.Tensor): template mask used to accumulate attention weights
-
-    Returns:
-        tokens_new (torch.Tensor): tokens after candidate elimination
-        keep_index (torch.Tensor): indices of kept search region tokens
-        removed_index (torch.Tensor): indices of removed search region tokens
-    """
     lens_s = attn.shape[-1] - lens_t -1 # 256
 
     lens_keep = math.ceil(keep_ratio * lens_s) # 180
@@ -90,7 +77,6 @@ def ceblock_forward(block, x, lens_t, keep_ratio_search=None):
     x = x.permute(1,0,2)
 
     x = x + block.mlp(block.ln_2(x)) # [197, 32, 768]
-    # return x, global_index_template, global_index_search, removed_index_search, attn
     return x
 
 class MultiLevel_Transformer(nn.Module):
@@ -103,26 +89,12 @@ class MultiLevel_Transformer(nn.Module):
         self.extract_layer = extract_layer
 
     def forward(self, x: torch.Tensor, lens_t, ce_keep_rate, ce_loc):
-        # ml_feature = []
-        # for i in range(max(self.extract_layer)+1):
-        #     if ce_keep_rate <1 and i in ce_loc:
-        #         x = ceblock_forward(self.resblocks[i], x, lens_t, ce_keep_rate)
-        #     else:
-        #         x = self.resblocks[i](x)
-        #     if i in self.extract_layer:
-        #         ml_feature.append(x)
-        # lens_x = x.shape[1] - lens_t - 1
-        # global_index_s = torch.linspace(0, lens_x - 1, lens_x).to(x.device)
-        # global_index_s = global_index_s.repeat(B, 1)
-        # removed_indexes_s = []
-
         for i in range(max(self.extract_layer)+1):
             if ce_keep_rate <1 and i in ce_loc:
                 x = ceblock_forward(self.resblocks[i], x, lens_t, ce_keep_rate)
             else:
                 x = self.resblocks[i](x)
         return x
-
 
 class MultiLevel_ImageEncoder_modified(nn.Module):
     def __init__(self, clip_visu_model, extract_layer):
@@ -148,11 +120,9 @@ class MultiLevel_ImageEncoder_modified(nn.Module):
         x = self.ln_pre(x) # LN
         x = torch.cat([x, text_tensors], dim=1)
         x = x.permute(1, 0, 2)  # NLD -> LND, B L H -> L B H [197, 32, 768]
-        # ml_x = self.transformer(x, txt_len, ce_keep_rate, ce_loc)
-        # ml_cls_token = [x[0, :, :] for x in ml_x] # split txt features
-        # cls_token = torch.cat(ml_cls_token, dim=1) # [32, 768*4]
         x = self.transformer(x, txt_len, ce_keep_rate, ce_loc)
-        cls_token = x[0, :, :] # split txt features
+        # cls_token = x[0, :, :] # split txt features
+        cls_token = torch.mean(x,dim=0)
         return cls_token
 
 class TextEncoder_modified(nn.Module):
@@ -172,9 +142,6 @@ class TextEncoder_modified(nn.Module):
         x = self.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_final(x).type(self.dtype)
-        # take features from the eot embedding (eot_token is the highest number in each sequence)
-        # TODO: ModifiedCLIP
-        # x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
         x = x @ self.text_projection
 
         return x
@@ -229,12 +196,8 @@ class OSVG(nn.Module):
             resize_pos_embed(self.clip.visual, self.patch_size, args.imsize)
         self.image_encoder_clip_vg = MultiLevel_ImageEncoder_modified(self.clip.visual, self.extract_layer)
         self.text_encoder_clip_vg = TextEncoder_modified(self.clip)
-        # self.text_encoder_clip_vg.eval()
-        # for param in self.text_encoder_clip_vg.parameters():
-        #     param.requires_grad = False
         self.bbox_embed = MLP(256, 256, 4, 3)
         self.neck = nn.Linear(self.clip.visual.transformer.width, 256)
-        # self.neck = nn.Linear(len(self.extract_layer) * self.clip.visual.transformer.width, self.clip.visual.transformer.width)
 
     def tensorize_inputs(self, images: NestedTensor, texts: NestedTensor):
         image_tensors = images.tensors
@@ -244,16 +207,6 @@ class OSVG(nn.Module):
     def forward(self, img_data, text_data, ce_keep_rate):
         image_tensors, text_tensors = self.tensorize_inputs(img_data, text_data)
         text_features = self.text_encoder_clip_vg(text_tensors)  # B * 77 * 512
-        visu_src = self.image_encoder_clip_vg(image_tensors.type(self.clip.dtype), self.text_resize(text_features), ce_keep_rate, self.ce_layer)  # B * 197 * 512 
-        visu_src = self.neck(visu_src)  # B 4H -> B H
-        pred_box = self.bbox_embed(visu_src).sigmoid()
-        return pred_box
-    
-    def test(self, img_data, text_data, ce_keep_rate):
-        image_tensors, text_tensors = self.tensorize_inputs(img_data, text_data)
-        text_features = self.text_encoder_clip_vg(text_tensors)  # B * 77 * 512
-
-
         visu_src = self.image_encoder_clip_vg(image_tensors.type(self.clip.dtype), self.text_resize(text_features), ce_keep_rate, self.ce_layer)  # B * 197 * 512 
         visu_src = self.neck(visu_src)  # B 4H -> B H
         pred_box = self.bbox_embed(visu_src).sigmoid()

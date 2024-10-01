@@ -11,10 +11,12 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
 import utils.misc as utils
-from models.osvg_clip import OSVG
+from models.osvg_clip_3 import OSVG
 from datasets import build_dataset
 from engine import train_one_epoch, validate
 from tensorboardX import SummaryWriter
+
+# cls_toekn =  torch.mean(img)
 
 def get_args_parser():
     parser = argparse.ArgumentParser('CLIP-VG Args', add_help=False)
@@ -38,7 +40,7 @@ def get_args_parser():
     parser.add_argument('--aug_scale', action='store_true', help="If true, use multi-scale augmentation")
     parser.add_argument('--aug_translate', action='store_true', help="If true, use random translate augmentation")
     # only support ViT-B/16 and ViT-L/14
-    parser.add_argument('--model', type=str, default='ViT-L/14@336px', help="Name of model to be exploited.")
+    parser.add_argument('--model', type=str, default='ViT-B/16', help="Name of model to be exploited.")
     parser.add_argument('--ce', action='store_true', help="If true, use gaussian blur augmentation")
     parser.add_argument('--ce_keep', default=1.0, type=float, help='image size')
     parser.add_argument('--ce_start', default=20, type=int, help='image size')
@@ -48,7 +50,7 @@ def get_args_parser():
     parser.add_argument('--nheads', default=8, type=int, help="Number of attention heads inside the transformer's attentions")
     parser.add_argument('--num_queries', default=100, type=int, help="Number of query slots")
     parser.add_argument('--pre_norm', action='store_true')
-    parser.add_argument('--imsize', default=336, type=int, help='image size')
+    parser.add_argument('--imsize', default=256, type=int, help='image size')
     # Loss options
     parser.add_argument('--bbox_w', default=1.0, type=float, help='image size')
     parser.add_argument('--giou_w', default=1.0, type=float, help='image size')
@@ -120,10 +122,12 @@ def main(args):
         elif (("clip" in n) and ('transformer' in n or "ln_final" in n or "token_embedding" in n or "text_projection" in n or "positional_embedding" in n) and p.requires_grad):
             text_param.append(p)
             text_names.append(n)
-        else:
+        elif p.requires_grad :
             rest_param.append(p)
             rest_names.append(n)
-
+    print('number of visual params: ', len(visu_names))
+    print('number of text params: ', len(text_names))
+    print('number of rest params: ', len(rest_names))
     param_list = [{"params": rest_param, "lr": args.lr},
                   {"params": visu_param, "lr": args.lr_visu},
                   {"params": text_param, "lr": args.lr_text}]
@@ -226,7 +230,7 @@ def main(args):
                 f.write(json.dumps(log_stats) + "\n")
 
         if args.output_dir:
-            checkpoint_paths = [os.path.join(args.output_dir, f'checkpoint.pth')]
+            checkpoint_paths = [os.path.join(args.output_dir, 'checkpoint.pth')]
             if val_stats['accu'] > best_accu:
                 checkpoint_paths.append(os.path.join(args.output_dir, 'best_checkpoint.pth'))
                 best_accu = val_stats['accu']
@@ -244,6 +248,9 @@ def main(args):
             writer.add_scalar('train/train_loss', train_stats['loss'], epoch)
             writer.add_scalar('train/bbox_loss', train_stats['loss_bbox'], epoch)
             writer.add_scalar('train/giou_loss', train_stats['loss_giou'], epoch)
+            writer.add_scalar('lr/rest_lr', lr_scheduler.get_last_lr()[0], epoch)
+            writer.add_scalar('lr/visu_lr', lr_scheduler.get_last_lr()[1], epoch)
+            writer.add_scalar('lr/text_lr', lr_scheduler.get_last_lr()[2], epoch)
             writer.add_scalar('val/miou', val_stats['miou'], epoch)
             writer.add_scalar('val/accu', val_stats['accu'], epoch)
     total_time = time.time() - start_time
